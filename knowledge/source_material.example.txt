@@ -1,0 +1,17 @@
+Paste client knowledge text here.
+
+Supported file types for the current simple RAG:
+- .txt
+- .md
+
+How it works:
+1. Put client materials into the knowledge folder.
+2. Use simple names, for example:
+   - thyroid_voc_phrases.txt
+   - thyroid_lecture_notes.txt
+   - brand_profile.md
+3. Run python main.py.
+4. The app will search these files by keywords from the topic, niche, and tone of voice.
+5. The best matching chunks will be added to the Gemini prompt.
+
+For now, .docx and .pdf are not read directly by the app. Convert them to .txt first and place the converted files here.
