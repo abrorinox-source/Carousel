@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from dotenv import load_dotenv
 from google.genai import errors
@@ -66,7 +66,7 @@ def main() -> None:
         renderer = CarouselRenderer(templates_dir=templates_dir, output_dir=output_dir)
         image_paths = renderer.render_slides(carousel)
 
-        caption_path = save_caption_file(carousel, output_dir)
+        caption_path = save_caption_file(carousel, renderer.last_output_dir)
 
         print("\nGenerated carousel JSON:")
         print(carousel.model_dump_json(indent=2))
