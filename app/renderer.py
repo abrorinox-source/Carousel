@@ -1,6 +1,4 @@
-import base64
 import json
-import mimetypes
 from datetime import datetime
 from pathlib import Path
 
@@ -18,17 +16,15 @@ class CarouselRenderer:
     def __init__(self, templates_dir: Path, output_dir: Path) -> None:
         self.templates_dir = templates_dir
         self.output_dir = output_dir
-        self.assets_dir = templates_dir.parent / "assets"
         self.config_dir = templates_dir.parent / "config"
-        self.background_image_path = self.assets_dir / "doctor.jpg"
         self.last_output_dir = output_dir
 
         self.environment = Environment(
             loader=FileSystemLoader(str(self.templates_dir)),
             autoescape=select_autoescape(["html", "xml"]),
         )
-        self.template = self.environment.get_template("card.html")
-        self.styles = (self.templates_dir / "style.css").read_text(encoding="utf-8")
+        self.template = self.environment.get_template("card_v2.html")
+        self.styles = (self.templates_dir / "style_v2.css").read_text(encoding="utf-8")
         self.brand = self._load_brand_config()
 
     def render_slides(self, carousel: CarouselOutput) -> list[Path]:
@@ -39,6 +35,8 @@ class CarouselRenderer:
         design_plan = build_design_plan(carousel.slides)
         self._save_manifest(run_dir, carousel, design_plan)
 
+        print(f"\nDesign family: {design_plan.family}")
+
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             page = browser.new_page(
@@ -47,7 +45,6 @@ class CarouselRenderer:
             )
 
             total_slides = len(carousel.slides)
-            background_image_uri = self._background_image_data_uri()
             for slide in carousel.slides:
                 slide_design = design_plan.slides[slide.number]
                 html = self.template.render(
@@ -55,9 +52,7 @@ class CarouselRenderer:
                     slide=slide,
                     total_slides=total_slides,
                     styles=self.styles,
-                    background_image_uri=background_image_uri,
                     family=design_plan.family,
-                    tokens=design_plan.tokens,
                     slide_design=slide_design,
                     brand=self.brand,
                 )
@@ -82,7 +77,7 @@ class CarouselRenderer:
         config_path = self.config_dir / "brand.json"
         fallback = {
             "handle": "@carouselfactory",
-            "footer_text": "Полезно и понятно о здоровье",
+            "footer_text": "Useful health content",
             "footer_username": "@carouselfactory",
             "default_mode": "random_family",
         }
@@ -100,7 +95,6 @@ class CarouselRenderer:
         manifest = {
             "title": carousel.title,
             "design_family": design_plan.family,
-            "tokens": design_plan.tokens,
             "slides": [
                 {
                     "number": slide.number,
@@ -115,11 +109,3 @@ class CarouselRenderer:
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-
-    def _background_image_data_uri(self) -> str:
-        if not self.background_image_path.exists():
-            return ""
-
-        mime_type = mimetypes.guess_type(self.background_image_path.name)[0] or "image/jpeg"
-        encoded_image = base64.b64encode(self.background_image_path.read_bytes()).decode("ascii")
-        return f"data:{mime_type};base64,{encoded_image}"
