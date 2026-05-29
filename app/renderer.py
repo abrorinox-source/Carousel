@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class CarouselRenderer:
         print(f"\nDesign family: {design_plan.family}")
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
+            browser = self._launch_browser(playwright)
             page = browser.new_page(
                 viewport={"width": CARD_WIDTH, "height": CARD_HEIGHT},
                 device_scale_factor=1,
@@ -65,6 +66,21 @@ class CarouselRenderer:
             browser.close()
 
         return rendered_paths
+
+    @staticmethod
+    def _launch_browser(playwright):
+        executable_path = os.getenv("CHROMIUM_EXECUTABLE_PATH", "").strip()
+        launch_options = {
+            "headless": True,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        }
+        if executable_path:
+            launch_options["executable_path"] = executable_path
+            print(f"Using system Chromium: {executable_path}")
+        return playwright.chromium.launch(**launch_options)
 
     def _create_run_dir(self) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True)
