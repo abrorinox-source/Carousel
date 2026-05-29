@@ -13,6 +13,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.ai_generator import AIGenerator
+from app.instagram_publisher import publish_carousel
 from app.renderer import CarouselRenderer
 from app.schemas import GenerationRequest
 from app.utils import save_caption_file
@@ -114,6 +115,19 @@ def _control_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("Reject", callback_data="reject"),
                 InlineKeyboardButton("Regenerate", callback_data="regenerate"),
             ],
+            [
+                InlineKeyboardButton("Pause", callback_data="pause"),
+                InlineKeyboardButton("Resume", callback_data="resume"),
+                InlineKeyboardButton("Reset", callback_data="reset"),
+            ],
+        ]
+    )
+
+
+def _approved_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Publish to Instagram", callback_data="publish")],
             [
                 InlineKeyboardButton("Pause", callback_data="pause"),
                 InlineKeyboardButton("Resume", callback_data="resume"),
@@ -234,7 +248,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/resume - resume queue\n"
         "/reset - clear everything\n\n"
         "After each carousel I will show buttons: Approve, Reject, Regenerate, Pause, Resume, Reset.\n"
-        "The next topic starts only after Approve or Reject."
+        "Approve only marks a post as approved. Use Publish to Instagram after approval."
     )
     await update.message.reply_text(message)
 
@@ -326,6 +340,19 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Queue reset.")
 
 
+def _run_paths_from_session(session: dict[str, Any], topic_item: dict[str, Any]) -> tuple[list[Path], Path, Path]:
+    run_dir = Path(topic_item.get("run_dir") or session.get("current_run_folder") or "")
+    if not run_dir.exists():
+        raise RuntimeError("Run folder not found. Regenerate this topic first.")
+    image_paths = sorted(run_dir.glob("slide_*.png"), key=lambda path: int(path.stem.split("_")[-1]))
+    caption_path = run_dir / "caption.txt"
+    if not image_paths:
+        raise RuntimeError("No slide images found in run folder.")
+    if not caption_path.exists():
+        raise RuntimeError("caption.txt not found in run folder.")
+    return image_paths, caption_path, run_dir
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -363,20 +390,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await context.bot.send_message(chat_id, "No active topic.")
         return
 
+    if action == "publish":
+        topic_item = topics[current_index]
+        try:
+            image_paths, caption_path, run_dir = _run_paths_from_session(session, topic_item)
+            await context.bot.send_message(chat_id, "Publishing to Instagram...")
+            result = await asyncio.to_thread(publish_carousel, image_paths, caption_path, run_dir)
+            topic_item["instagram_status"] = "published"
+            topic_item["instagram_media_id"] = result.get("instagram_media_id")
+            topic_item["public_image_urls"] = result.get("image_urls", [])
+            _save_session(session)
+            await context.bot.send_message(
+                chat_id,
+                f"Published to Instagram. Media ID: {result.get('instagram_media_id')}",
+            )
+        except Exception as exc:
+            await context.bot.send_message(chat_id, f"Instagram publish failed: {exc}")
+        return
+
     if action == "approve":
         topics[current_index]["status"] = "approved"
-        session["current_index"] = current_index + 1
         await query.edit_message_reply_markup(reply_markup=None)
-        if session["current_index"] >= len(topics):
-            session["status"] = "completed"
-            _save_session(session)
-            await context.bot.send_message(chat_id, "Approved. Queue completed.")
-        else:
-            session["status"] = "queued"
-            session["next_due"] = time.time() + int(session.get("interval_seconds", DEFAULT_INTERVAL_SECONDS))
-            _save_session(session)
-            _ensure_runner(context, chat_id)
-            await context.bot.send_message(chat_id, "Approved. Next topic will start after the interval.")
+        _save_session(session)
+        await context.bot.send_message(
+            chat_id,
+            "Approved. Publish now or reject later. Next topic will start only after Reject or after you manually continue with /resume.",
+            reply_markup=_approved_keyboard(),
+        )
         return
 
     if action == "reject":
