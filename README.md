@@ -1,4 +1,4 @@
-﻿# Carousel Factory
+# Carousel Factory
 
 A local Python MVP that generates AI carousel content with Gemini and renders every slide into PNG images.
 
@@ -10,6 +10,7 @@ A local Python MVP that generates AI carousel content with Gemini and renders ev
 - pydantic
 - jinja2
 - playwright
+- simple keyword RAG over local `.txt` and `.md` files
 
 ## Project structure
 
@@ -23,11 +24,15 @@ carousel-factory/
   app/
     __init__.py
     ai_generator.py
+    rag.py
     renderer.py
     schemas.py
     utils.py
   assets/
     doctor.jpg
+  knowledge/
+    medical_rules.md
+    source_material.example.txt
   templates/
     card.html
     style.css
@@ -93,11 +98,48 @@ When running `python main.py`, the terminal will ask:
 
 The app then:
 
-1. Generates structured carousel content with Gemini.
-2. Validates and parses the response using Pydantic.
-3. Renders each slide into PNG using Jinja2 + Playwright.
-4. Saves slide images in `output/slide_1.png`, `output/slide_2.png`, etc.
-5. Saves `caption`, `cta`, and `hashtags` in `output/caption.txt`.
+1. Searches local files in `knowledge/` using simple keyword RAG.
+2. Adds the best matching chunks to the Gemini prompt.
+3. Generates structured carousel content with Gemini.
+4. Validates and parses the response using Pydantic.
+5. Renders each slide into PNG using Jinja2 + Playwright.
+6. Saves slide images in `output/slide_1.png`, `output/slide_2.png`, etc.
+7. Saves `caption`, `cta`, and `hashtags` in `output/caption.txt`.
+
+## Simple RAG workflow
+
+The app currently supports local knowledge files with these extensions:
+
+```text
+.txt
+.md
+```
+
+To use client materials:
+
+1. Convert `.docx` or `.pdf` files to `.txt` first.
+2. Put the converted files into the `knowledge/` folder.
+3. Use clear file names, for example:
+
+```text
+knowledge/thyroid_voc_phrases.txt
+knowledge/thyroid_lecture_notes.txt
+knowledge/brand_profile.md
+```
+
+When you run `python main.py`, the app will print which knowledge chunks were used:
+
+```text
+RAG context used:
+- thyroid_voc_phrases.txt | score=8
+- medical_rules.md | score=3
+```
+
+This is not vector search yet. It is a lightweight MVP search that scores chunks by keyword matches from topic, niche, and tone of voice.
+
+## Medical safety note
+
+For medical topics, keep the content educational. The prompt tells the model not to diagnose, prescribe medication, recommend dosages, or tell people to stop/change medication.
 
 ## Output JSON shape
 
