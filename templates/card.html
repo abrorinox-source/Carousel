@@ -1,0 +1,42 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }} - Slide {{ slide.number }}</title>
+  <style>
+{{ styles }}
+  </style>
+</head>
+<body>
+  <main class="card">
+    {% if background_image_uri %}
+    <div class="card__visual" aria-hidden="true">
+      <img src="{{ background_image_uri }}" alt="">
+    </div>
+    {% endif %}
+
+    <div class="card__shade" aria-hidden="true"></div>
+
+    <header class="card__header">
+      <p class="card__handle">@carouselfactory</p>
+      <p class="card__title">{{ title }}</p>
+    </header>
+
+    <section class="card__content">
+      <h1 class="card__headline">{{ slide.number }}. {{ slide.headline }}</h1>
+      <p class="card__text">{{ slide.text }}</p>
+    </section>
+
+    <footer class="card__footer">
+      <p class="card__counter">{{ slide.number }}/{{ total_slides }}</p>
+      <div class="card__dots" aria-hidden="true">
+        {% for item in range(total_slides) %}
+          <span class="card__dot{% if loop.index == slide.number %} card__dot--active{% endif %}"></span>
+        {% endfor %}
+      </div>
+      <span class="card__arrow">-&gt;</span>
+    </footer>
+  </main>
+</body>
+</html>
