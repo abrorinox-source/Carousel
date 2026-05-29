@@ -55,9 +55,11 @@ class AIGenerator:
         json_payload = self._extract_json(raw_text)
         carousel = CarouselOutput.model_validate_json(json_payload)
 
-        if len(carousel.slides) != request.slides_count:
+        expected_slides = request.slides_count + 1
+        if len(carousel.slides) != expected_slides:
             raise ValueError(
-                f"Expected {request.slides_count} slides, but got {len(carousel.slides)}."
+                f"Expected {expected_slides} slides ({request.slides_count} content slides + 1 final CTA slide), "
+                f"but got {len(carousel.slides)}."
             )
 
         return carousel
@@ -77,6 +79,8 @@ class AIGenerator:
 
     @staticmethod
     def _build_prompt(request: GenerationRequest, knowledge_context: str = "") -> str:
+        final_slide_number = request.slides_count + 1
+
         if knowledge_context.strip():
             knowledge_block = (
                 "Knowledge context from local files:\n"
@@ -104,8 +108,17 @@ class AIGenerator:
             f"Topic: {request.topic}\n"
             f"Niche: {request.niche}\n"
             f"Language: {request.language}\n"
-            f"Slides count: {request.slides_count}\n"
+            f"Content slides count: {request.slides_count}\n"
+            f"Final CTA slide number: {final_slide_number}\n"
             f"Tone of voice: {request.tone_of_voice}\n\n"
+            "Important slide-count rule:\n"
+            f"- Create exactly {request.slides_count} content slides about the topic.\n"
+            f"- Then add exactly 1 final subscription CTA slide as slide {final_slide_number}.\n"
+            f"- Total slides must be exactly {final_slide_number}.\n"
+            "- The final slide should not introduce new medical information.\n"
+            "- The final slide should invite the reader to subscribe/follow so they do not lose useful health content.\n"
+            "- Good final slide wording examples: 'Чтобы не потерять — подпишитесь', 'Подпишитесь, чтобы спокойно разбираться в своём здоровье', 'Сохраните пост и подпишитесь, чтобы вернуться к теме позже'.\n"
+            "- Keep the final CTA soft, natural, and not salesy.\n\n"
             "Return JSON with this exact shape:\n"
             "{\n"
             '  "title": "string",\n'
@@ -121,11 +134,13 @@ class AIGenerator:
             '  "hashtags": ["string"]\n'
             "}\n\n"
             "Requirements:\n"
-            "- Use exactly the requested number of slides.\n"
+            f"- Use exactly {final_slide_number} slides total.\n"
+            f"- Slides 1 to {request.slides_count} are content slides.\n"
+            f"- Slide {final_slide_number} is the final subscribe/follow CTA slide.\n"
             "- Do not put slide numbers in headlines.\n"
             "- Keep each slide text short and readable.\n"
             "- Write slide text as 1 to 3 compact sentences.\n"
             "- Make hashtags relevant to the niche and topic.\n"
             "- Number slides sequentially starting from 1.\n"
-            "- For medical topics, always keep the content educational and include a soft doctor-consultation CTA."
+            "- For medical topics, always keep the content educational and include a soft doctor-consultation CTA in the caption if relevant."
         )
