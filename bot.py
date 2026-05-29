@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
+import time
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
-from telegram import InputMediaPhoto, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.ai_generator import AIGenerator
 from app.renderer import CarouselRenderer
@@ -16,43 +20,83 @@ from app.utils import save_caption_file
 DEFAULT_NICHE = "thyroid health / endocrinology"
 DEFAULT_LANGUAGE = "Russian"
 DEFAULT_SLIDES_COUNT = 7
-DEFAULT_TONE = "спокойный, экспертный, простой, без запугивания"
+DEFAULT_TONE = "calm, expert, simple, no fearmongering"
+DEFAULT_INTERVAL_SECONDS = 30 * 60
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 OUTPUT_DIR = PROJECT_ROOT / "output"
+DATA_DIR = PROJECT_ROOT / "data" / "sessions"
+
+RUNNERS: dict[int, asyncio.Task] = {}
 
 
-def _parse_message(text: str) -> GenerationRequest:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    values: dict[str, str] = {}
+def _session_path(chat_id: int) -> Path:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return DATA_DIR / f"{chat_id}.json"
 
-    for line in lines:
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        values[key.strip().lower()] = value.strip()
 
-    topic = values.get("topic") or values.get("тема") or text.strip()
-    niche = values.get("niche") or values.get("ниша") or DEFAULT_NICHE
-    language = values.get("language") or values.get("язык") or DEFAULT_LANGUAGE
-    tone = values.get("tone") or values.get("tone of voice") or values.get("тон") or DEFAULT_TONE
+def _load_session(chat_id: int) -> dict[str, Any]:
+    path = _session_path(chat_id)
+    if not path.exists():
+        return {
+            "chat_id": chat_id,
+            "status": "idle",
+            "topics": [],
+            "current_index": 0,
+            "interval_seconds": DEFAULT_INTERVAL_SECONDS,
+            "next_due": 0,
+        }
+    return json.loads(path.read_text(encoding="utf-8"))
 
-    raw_slides = values.get("slides") or values.get("slides count") or values.get("слайды") or ""
-    slides_count = DEFAULT_SLIDES_COUNT
-    if raw_slides.isdigit():
-        slides_count = max(1, min(20, int(raw_slides)))
 
-    return GenerationRequest(
-        topic=topic,
-        niche=niche,
-        language=language,
-        slides_count=slides_count,
-        tone_of_voice=tone,
+def _save_session(session: dict[str, Any]) -> None:
+    _session_path(int(session["chat_id"])).write_text(
+        json.dumps(session, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
 
-def _generate_carousel(request: GenerationRequest) -> tuple[list[Path], Path, Path]:
+def _reset_session(chat_id: int) -> None:
+    path = _session_path(chat_id)
+    if path.exists():
+        path.unlink()
+
+
+def _parse_topics(text: str) -> list[str]:
+    cleaned = text.strip()
+    if cleaned.startswith("/queue"):
+        cleaned = cleaned.replace("/queue", "", 1).strip()
+
+    topics: list[str] = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[-*]+\s*", "", line)
+        line = re.sub(r"^\d+[\.)\-:]\s*", "", line)
+        line = line.strip()
+        if line:
+            topics.append(line)
+
+    if not topics and cleaned:
+        topics = [cleaned]
+
+    return topics
+
+
+def _build_request(topic: str) -> GenerationRequest:
+    return GenerationRequest(
+        topic=topic,
+        niche=DEFAULT_NICHE,
+        language=DEFAULT_LANGUAGE,
+        slides_count=DEFAULT_SLIDES_COUNT,
+        tone_of_voice=DEFAULT_TONE,
+    )
+
+
+def _generate_carousel(topic: str) -> tuple[list[Path], Path, Path]:
+    request = _build_request(topic)
     generator = AIGenerator()
     carousel = generator.generate(request)
 
@@ -62,54 +106,303 @@ def _generate_carousel(request: GenerationRequest) -> tuple[list[Path], Path, Pa
     return image_paths, caption_path, renderer.last_output_dir
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = (
-        "Привет. Отправьте тему одним сообщением, и я создам карусель.\n\n"
-        "Можно просто так:\n"
-        "Почему ТТГ в норме, а я всё равно чувствую усталость\n\n"
-        "Или расширенно:\n"
-        "Topic: Почему ТТГ в норме, а я всё равно чувствую усталость\n"
-        "Niche: thyroid health / endocrinology\n"
-        "Language: Russian\n"
-        "Slides: 7\n"
-        "Tone: спокойный, экспертный, простой"
+def _control_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Approve", callback_data="approve"),
+                InlineKeyboardButton("Reject", callback_data="reject"),
+                InlineKeyboardButton("Regenerate", callback_data="regenerate"),
+            ],
+            [
+                InlineKeyboardButton("Pause", callback_data="pause"),
+                InlineKeyboardButton("Resume", callback_data="resume"),
+                InlineKeyboardButton("Reset", callback_data="reset"),
+            ],
+        ]
     )
-    await update.message.reply_text(message)
 
 
-async def generate_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.text:
-        return
-
-    request = _parse_message(update.message.text)
-    await update.message.reply_text("Генерирую карусель. Это может занять 1-2 минуты...")
-
-    try:
-        image_paths, caption_path, run_dir = await asyncio.to_thread(_generate_carousel, request)
-    except Exception as exc:
-        await update.message.reply_text(f"Ошибка: {exc}")
-        return
+async def _send_generated_result(context: ContextTypes.DEFAULT_TYPE, chat_id: int, topic: str, index: int, total: int) -> tuple[str, int | None]:
+    await context.bot.send_message(chat_id, f"Generating {index}/{total}: {topic}")
+    image_paths, caption_path, run_dir = await asyncio.to_thread(_generate_carousel, topic)
 
     media_group = []
     opened_files = []
     try:
-        for index, image_path in enumerate(image_paths[:10]):
+        for image_index, image_path in enumerate(image_paths[:10]):
             file_handle = image_path.open("rb")
             opened_files.append(file_handle)
-            if index == 0:
-                media_group.append(InputMediaPhoto(file_handle, caption="Готово. Карусель сгенерирована."))
+            if image_index == 0:
+                media_group.append(InputMediaPhoto(file_handle, caption=f"Generated {index}/{total}"))
             else:
                 media_group.append(InputMediaPhoto(file_handle))
 
         if media_group:
-            await update.message.reply_media_group(media_group)
+            await context.bot.send_media_group(chat_id, media_group)
 
-        caption_text = caption_path.read_text(encoding="utf-8")
-        await update.message.reply_text(caption_text[:3900])
-        await update.message.reply_text(f"Run folder: {run_dir}")
+        caption_text = caption_path.read_text(encoding="utf-8")[:3300]
+        control = await context.bot.send_message(
+            chat_id,
+            f"Topic {index}/{total}\n\n{caption_text}\n\nRun folder: {run_dir}\n\nChoose what to do next:",
+            reply_markup=_control_keyboard(),
+        )
+        return str(run_dir), control.message_id
     finally:
         for file_handle in opened_files:
             file_handle.close()
+
+
+async def _queue_runner(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    while True:
+        session = _load_session(chat_id)
+        status = session.get("status", "idle")
+
+        if status in {"idle", "completed"}:
+            RUNNERS.pop(chat_id, None)
+            return
+
+        if status in {"paused", "waiting_approval", "generating"}:
+            await asyncio.sleep(5)
+            continue
+
+        topics = session.get("topics", [])
+        current_index = int(session.get("current_index", 0))
+        if current_index >= len(topics):
+            session["status"] = "completed"
+            _save_session(session)
+            await context.bot.send_message(chat_id, "Queue completed.")
+            RUNNERS.pop(chat_id, None)
+            return
+
+        next_due = float(session.get("next_due", 0))
+        now = time.time()
+        if next_due > now:
+            await asyncio.sleep(min(10, next_due - now))
+            continue
+
+        topic_item = topics[current_index]
+        topic = topic_item["topic"]
+        topic_item["status"] = "generating"
+        topic_item["attempt"] = int(topic_item.get("attempt", 0)) + 1
+        session["status"] = "generating"
+        _save_session(session)
+
+        try:
+            run_dir, control_message_id = await _send_generated_result(
+                context,
+                chat_id,
+                topic,
+                current_index + 1,
+                len(topics),
+            )
+            session = _load_session(chat_id)
+            session["status"] = "waiting_approval"
+            session["current_run_folder"] = run_dir
+            session["control_message_id"] = control_message_id
+            session["topics"][current_index]["status"] = "waiting_approval"
+            session["topics"][current_index]["run_dir"] = run_dir
+            _save_session(session)
+        except Exception as exc:
+            session = _load_session(chat_id)
+            session["status"] = "waiting_approval"
+            session["topics"][current_index]["status"] = "failed"
+            session["topics"][current_index]["error"] = str(exc)
+            _save_session(session)
+            await context.bot.send_message(
+                chat_id,
+                f"Generation failed for topic {current_index + 1}: {exc}\nUse Regenerate, Reject, Pause, or Reset.",
+                reply_markup=_control_keyboard(),
+            )
+
+
+def _ensure_runner(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    task = RUNNERS.get(chat_id)
+    if task and not task.done():
+        return
+    RUNNERS[chat_id] = asyncio.create_task(_queue_runner(context, chat_id))
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = (
+        "Send a list of topics and I will generate them one by one.\n\n"
+        "Commands:\n"
+        "/queue - send topics after this command or just send a numbered list\n"
+        "/interval 30 - set interval in minutes\n"
+        "/status - show queue status\n"
+        "/pause - pause queue\n"
+        "/resume - resume queue\n"
+        "/reset - clear everything\n\n"
+        "After each carousel I will show buttons: Approve, Reject, Regenerate, Pause, Resume, Reset.\n"
+        "The next topic starts only after Approve or Reject."
+    )
+    await update.message.reply_text(message)
+
+
+async def set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /interval 30")
+        return
+
+    minutes = max(1, min(1440, int(context.args[0])))
+    session = _load_session(chat_id)
+    session["interval_seconds"] = minutes * 60
+    _save_session(session)
+    await update.message.reply_text(f"Interval set to {minutes} minutes.")
+
+
+async def queue_topics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    text = update.message.text or ""
+    topics = _parse_topics(text)
+    if not topics:
+        await update.message.reply_text("Send topics after /queue, one topic per line.")
+        return
+
+    session = _load_session(chat_id)
+    session["topics"] = [
+        {"id": index + 1, "topic": topic, "status": "pending", "attempt": 0}
+        for index, topic in enumerate(topics)
+    ]
+    session["current_index"] = 0
+    session["status"] = "queued"
+    session["next_due"] = time.time()
+    _save_session(session)
+    _ensure_runner(context, chat_id)
+
+    await update.message.reply_text(
+        f"Queue saved: {len(topics)} topics. First generation will start now."
+    )
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    session = _load_session(chat_id)
+    topics = session.get("topics", [])
+    current_index = int(session.get("current_index", 0))
+    interval_minutes = int(session.get("interval_seconds", DEFAULT_INTERVAL_SECONDS)) // 60
+
+    if not topics:
+        await update.message.reply_text("No active queue.")
+        return
+
+    current_topic = topics[current_index]["topic"] if current_index < len(topics) else "Done"
+    await update.message.reply_text(
+        f"Status: {session.get('status')}\n"
+        f"Progress: {min(current_index + 1, len(topics))}/{len(topics)}\n"
+        f"Interval: {interval_minutes} minutes\n"
+        f"Current topic: {current_topic}"
+    )
+
+
+async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    session = _load_session(chat_id)
+    session["status"] = "paused"
+    _save_session(session)
+    await update.message.reply_text("Paused.")
+
+
+async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    session = _load_session(chat_id)
+    if not session.get("topics"):
+        await update.message.reply_text("No queue to resume.")
+        return
+    session["status"] = "queued"
+    session["next_due"] = time.time()
+    _save_session(session)
+    _ensure_runner(context, chat_id)
+    await update.message.reply_text("Resumed.")
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    _reset_session(chat_id)
+    task = RUNNERS.pop(chat_id, None)
+    if task:
+        task.cancel()
+    await update.message.reply_text("Queue reset.")
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    action = query.data
+    session = _load_session(chat_id)
+
+    if action == "reset":
+        _reset_session(chat_id)
+        task = RUNNERS.pop(chat_id, None)
+        if task:
+            task.cancel()
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(chat_id, "Queue reset.")
+        return
+
+    if action == "pause":
+        session["status"] = "paused"
+        _save_session(session)
+        await context.bot.send_message(chat_id, "Paused.")
+        return
+
+    if action == "resume":
+        if session.get("topics"):
+            session["status"] = "queued"
+            session["next_due"] = time.time()
+            _save_session(session)
+            _ensure_runner(context, chat_id)
+            await context.bot.send_message(chat_id, "Resumed.")
+        return
+
+    topics = session.get("topics", [])
+    current_index = int(session.get("current_index", 0))
+    if current_index >= len(topics):
+        await context.bot.send_message(chat_id, "No active topic.")
+        return
+
+    if action == "approve":
+        topics[current_index]["status"] = "approved"
+        session["current_index"] = current_index + 1
+        await query.edit_message_reply_markup(reply_markup=None)
+        if session["current_index"] >= len(topics):
+            session["status"] = "completed"
+            _save_session(session)
+            await context.bot.send_message(chat_id, "Approved. Queue completed.")
+        else:
+            session["status"] = "queued"
+            session["next_due"] = time.time() + int(session.get("interval_seconds", DEFAULT_INTERVAL_SECONDS))
+            _save_session(session)
+            _ensure_runner(context, chat_id)
+            await context.bot.send_message(chat_id, "Approved. Next topic will start after the interval.")
+        return
+
+    if action == "reject":
+        topics[current_index]["status"] = "rejected"
+        session["current_index"] = current_index + 1
+        await query.edit_message_reply_markup(reply_markup=None)
+        if session["current_index"] >= len(topics):
+            session["status"] = "completed"
+            _save_session(session)
+            await context.bot.send_message(chat_id, "Rejected. Queue completed.")
+        else:
+            session["status"] = "queued"
+            session["next_due"] = time.time() + int(session.get("interval_seconds", DEFAULT_INTERVAL_SECONDS))
+            _save_session(session)
+            _ensure_runner(context, chat_id)
+            await context.bot.send_message(chat_id, "Rejected. Next topic will start after the interval.")
+        return
+
+    if action == "regenerate":
+        topics[current_index]["status"] = "pending"
+        session["status"] = "queued"
+        session["next_due"] = time.time()
+        _save_session(session)
+        await query.edit_message_reply_markup(reply_markup=None)
+        _ensure_runner(context, chat_id)
+        await context.bot.send_message(chat_id, "Regenerating the same topic.")
 
 
 def main() -> None:
@@ -120,9 +413,16 @@ def main() -> None:
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_from_message))
+    app.add_handler(CommandHandler("interval", set_interval))
+    app.add_handler(CommandHandler("queue", queue_topics))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("pause", pause))
+    app.add_handler(CommandHandler("resume", resume))
+    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, queue_topics))
 
-    print("Telegram bot is running...")
+    print("Queue Telegram bot is running...")
     app.run_polling()
 
 
