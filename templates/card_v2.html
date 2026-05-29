@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>{{ styles }}</style>
+</head>
+<body>
+<main class="card family-{{ family }} layout-{{ slide_design.layout }} text-{{ slide_design.text_size }}">
+<header class="top">
+<p class="handle">{{ brand.handle }}</p>
+<p class="title">{{ title }}</p>
+</header>
+<section class="content">
+<h1>{{ slide.headline }}</h1>
+<p class="bodytext">{{ slide.text }}</p>
+</section>
+<footer class="bottom">
+<div class="footcopy">
+<p>{{ brand.footer_text }}</p>
+<b>{{ brand.footer_username }}</b>
+</div>
+<p class="count">{{ slide.number }}/{{ total_slides }}</p>
+<span class="arrow">-&gt;</span>
+</footer>
+</main>
+</body>
+</html>
