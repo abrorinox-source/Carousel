@@ -1,9 +1,11 @@
-﻿import os
+import os
 import re
+from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
 
+from app.rag import KeywordRag
 from app.schemas import CarouselOutput, GenerationRequest
 
 
@@ -20,8 +22,23 @@ class AIGenerator:
         self.model = model or os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         self.client = genai.Client(api_key=api_key)
 
+        project_root = Path(__file__).resolve().parents[1]
+        self.rag = KeywordRag(knowledge_dir=project_root / "knowledge")
+
     def generate(self, request: GenerationRequest) -> CarouselOutput:
-        prompt = self._build_prompt(request)
+        rag_context = self.rag.build_context(
+            query=f"{request.topic} {request.niche} {request.tone_of_voice}",
+            top_k=5,
+        )
+        prompt = self._build_prompt(request, knowledge_context=rag_context.text)
+
+        if rag_context.has_context:
+            print("\nRAG context used:")
+            for chunk in rag_context.chunks:
+                print(f"- {chunk.source} | score={chunk.score}")
+        else:
+            print("\nRAG context used: no relevant chunks found")
+
         response = self.client.models.generate_content(
             model=self.model,
             contents=prompt,
@@ -59,12 +76,31 @@ class AIGenerator:
         return text[start : end + 1].strip()
 
     @staticmethod
-    def _build_prompt(request: GenerationRequest) -> str:
+    def _build_prompt(request: GenerationRequest, knowledge_context: str = "") -> str:
+        if knowledge_context.strip():
+            knowledge_block = (
+                "Knowledge context from local files:\n"
+                "Use this context as the primary source for audience language, pains, hooks, and topic details.\n"
+                "Do not invent medical claims that are not supported by this context.\n"
+                "If a medical detail is not present in the context, write in a general educational way and recommend consulting a specialist.\n\n"
+                f"{knowledge_context}\n\n"
+            )
+        else:
+            knowledge_block = (
+                "No relevant local knowledge context was found for this topic.\n"
+                "Keep the carousel general, educational, and safe. Do not invent specific medical claims.\n\n"
+            )
+
         return (
-            "You are an expert social media strategist. "
+            "You are an expert social media strategist and careful health-content editor. "
             "Create a concise Instagram carousel in valid JSON format only. "
             "Do not add markdown fences, comments, or extra text. "
+            "This is educational content, not personal medical advice. "
+            "Do not diagnose, prescribe medication, recommend dosages, or tell people to stop/change medication. "
+            "Use soft wording like 'может быть связано', 'стоит обсудить со специалистом', 'важно проверить'. "
+            "Avoid fearmongering and fake guarantees. "
             "\n\n"
+            f"{knowledge_block}"
             f"Topic: {request.topic}\n"
             f"Niche: {request.niche}\n"
             f"Language: {request.language}\n"
@@ -90,5 +126,6 @@ class AIGenerator:
             "- Keep each slide text short and readable.\n"
             "- Write slide text as 1 to 3 compact sentences.\n"
             "- Make hashtags relevant to the niche and topic.\n"
-            "- Number slides sequentially starting from 1."
+            "- Number slides sequentially starting from 1.\n"
+            "- For medical topics, always keep the content educational and include a soft doctor-consultation CTA."
         )
