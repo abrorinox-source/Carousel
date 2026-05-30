@@ -10,6 +10,7 @@ import requests
 from dotenv import load_dotenv
 
 GRAPH_BASE_URL = "https://graph.facebook.com/v25.0"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstagramPublishError(RuntimeError):
@@ -23,6 +24,26 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _resolve_public_base_url() -> str:
+    value = os.getenv("PUBLIC_BASE_URL", "").strip()
+    if value:
+        return value.rstrip("/")
+
+    value_file = os.getenv("PUBLIC_BASE_URL_FILE", "").strip()
+    if value_file:
+        path = Path(value_file)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        if path.exists():
+            file_value = path.read_text(encoding="utf-8").strip()
+            if file_value:
+                return file_value.rstrip("/")
+
+    raise InstagramPublishError(
+        "PUBLIC_BASE_URL is missing in .env and PUBLIC_BASE_URL_FILE did not point to a valid URL."
+    )
+
+
 def _safe_caption(caption_path: Path) -> str:
     if not caption_path.exists():
         return ""
@@ -30,8 +51,12 @@ def _safe_caption(caption_path: Path) -> str:
 
 
 def _copy_images_to_public_dir(image_paths: list[Path], run_dir: Path) -> list[str]:
-    upload_dir = Path(_required_env("PUBLIC_UPLOAD_DIR"))
-    public_base_url = _required_env("PUBLIC_BASE_URL").rstrip("/")
+    upload_dir_value = os.getenv("PUBLIC_UPLOAD_DIR", "").strip()
+    upload_dir = Path(upload_dir_value) if upload_dir_value else PROJECT_ROOT / "output"
+    if not upload_dir.is_absolute():
+        upload_dir = PROJECT_ROOT / upload_dir
+    upload_dir = upload_dir.resolve()
+    public_base_url = _resolve_public_base_url()
 
     public_run_name = run_dir.name
     target_dir = upload_dir / public_run_name
@@ -40,7 +65,8 @@ def _copy_images_to_public_dir(image_paths: list[Path], run_dir: Path) -> list[s
     public_urls: list[str] = []
     for image_path in image_paths:
         target_path = target_dir / image_path.name
-        shutil.copy2(image_path, target_path)
+        if image_path.resolve() != target_path.resolve():
+            shutil.copy2(image_path, target_path)
         public_urls.append(f"{public_base_url}/{quote(public_run_name)}/{quote(image_path.name)}")
 
     return public_urls

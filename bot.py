@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import asyncio
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -28,8 +31,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 DATA_DIR = PROJECT_ROOT / "data" / "sessions"
+PUBLIC_BASE_URL_FILE = PROJECT_ROOT / ".public_base_url"
 
 RUNNERS: dict[int, asyncio.Task] = {}
+PUBLIC_TUNNEL_PROCESS: subprocess.Popen[str] | None = None
 
 
 def _session_path(chat_id: int) -> Path:
@@ -235,6 +240,61 @@ def _ensure_runner(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     if task and not task.done():
         return
     RUNNERS[chat_id] = asyncio.create_task(_queue_runner(context, chat_id))
+
+
+def _start_public_tunnel() -> subprocess.Popen[str] | None:
+    global PUBLIC_TUNNEL_PROCESS
+
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "").strip()
+    if public_base_url:
+        print(f"PUBLIC_BASE_URL is set, skipping tunnel start: {public_base_url}")
+        return None
+
+    if PUBLIC_TUNNEL_PROCESS and PUBLIC_TUNNEL_PROCESS.poll() is None:
+        return PUBLIC_TUNNEL_PROCESS
+
+    tunnel_script = PROJECT_ROOT / "scripts" / "public_tunnel.py"
+    if not tunnel_script.exists():
+        raise RuntimeError(f"Tunnel script not found: {tunnel_script}")
+
+    print("Starting public tunnel for Instagram uploads...")
+    PUBLIC_TUNNEL_PROCESS = subprocess.Popen(
+        [sys.executable, str(tunnel_script), "--port", "8001"],
+        cwd=str(PROJECT_ROOT),
+    )
+    return PUBLIC_TUNNEL_PROCESS
+
+
+def _stop_public_tunnel() -> None:
+    global PUBLIC_TUNNEL_PROCESS
+
+    process = PUBLIC_TUNNEL_PROCESS
+    if not process:
+        return
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    PUBLIC_TUNNEL_PROCESS = None
+
+
+def _wait_for_public_base_url(timeout_seconds: int = 60) -> None:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if PUBLIC_BASE_URL_FILE.exists():
+            value = PUBLIC_BASE_URL_FILE.read_text(encoding="utf-8").strip()
+            if value:
+                return
+        time.sleep(1)
+    raise RuntimeError(
+        f"Public base URL was not written to {PUBLIC_BASE_URL_FILE} within {timeout_seconds} seconds."
+    )
+
+
+def _register_cleanup() -> None:
+    atexit.register(_stop_public_tunnel)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -451,6 +511,11 @@ def main() -> None:
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing. Add it to your .env file.")
 
+    _register_cleanup()
+    _start_public_tunnel()
+    if not os.getenv("PUBLIC_BASE_URL", "").strip():
+        _wait_for_public_base_url()
+
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("interval", set_interval))
@@ -463,7 +528,10 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, queue_topics))
 
     print("Queue Telegram bot is running...")
-    app.run_polling()
+    try:
+        app.run_polling()
+    finally:
+        _stop_public_tunnel()
 
 
 if __name__ == "__main__":
